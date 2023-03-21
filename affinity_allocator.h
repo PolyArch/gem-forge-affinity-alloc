@@ -406,7 +406,8 @@ public:
       this->bankScores.at(bank) = costHops + loadCoeff * costLoad;
     }
 #else
-    for (BankT bank = 0; bank < MaxBanks; bank += 8) {
+#pragma clang loop vectorize_width(8)
+    for (BankT bank = 0; bank < MaxBanks; bank++) {
       auto costHops = this->hopsToEachBank.hops.at(bank) / nAffinityAddrs;
       auto costLoad = static_cast<ScoreT>(this->allocBankCount.at(bank)) /
                           static_cast<ScoreT>(avgAllocCountPerBank) -

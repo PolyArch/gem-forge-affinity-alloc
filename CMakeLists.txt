@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.4)
 project("AffinityAlloc")
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 set(AffinityAllocSrc
     affinity_alloc.cpp
     affinity_allocator.cpp
