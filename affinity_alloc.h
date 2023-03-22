@@ -3,7 +3,9 @@
 
 #include "stdlib.h"
 
+#ifdef __cplusplus
 extern "C" {
+#endif
 
 /**
  * @brief Alloc the block closer to a list of addresses.
@@ -20,6 +22,9 @@ void *malloc_aff(size_t size, int n, const void **affinity_addrs);
  * @param ptr
  */
 void free_aff(void *ptr);
+
+#ifdef __cplusplus
 }
+#endif
 
 #endif
