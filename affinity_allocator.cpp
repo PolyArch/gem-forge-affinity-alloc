@@ -22,6 +22,8 @@ AffinityAllocatorArgs AffinityAllocatorArgs::initialize() {
       args.allocPolicy = AllocPolicy::MIN_LOAD;
     } else if (allocPolicy == "HYBRID") {
       args.allocPolicy = AllocPolicy::HYBRID;
+    } else if (allocPolicy == "DELTA") {
+      args.allocPolicy = AllocPolicy::DELTA;
     }
   }
 

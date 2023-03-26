@@ -53,7 +53,13 @@ using Addr = std::uintptr_t;
 using AffinityAddressVecT = std::vector<Addr>;
 
 struct AffinityAllocatorArgs {
-  enum AllocPolicy { RANDOM = 0, MIN_HOPS = 1, MIN_LOAD = 2, HYBRID = 3 };
+  enum AllocPolicy {
+    RANDOM = 0,
+    MIN_HOPS = 1,
+    MIN_LOAD = 2,
+    HYBRID = 3,
+    DELTA = 4
+  };
   AllocPolicy allocPolicy = RANDOM;
   // Initialize from enviroment variables.
   static AffinityAllocatorArgs initialize();
@@ -87,8 +93,11 @@ public:
         numCols(m5_stream_nuca_get_property(
             nullptr, STREAM_NUCA_REGION_PROPERTY_BANK_COLS)),
         colMask(numCols - 1), colBits(countBits(numCols)),
-        totalBanks(numRows * numCols), totalBankBits(countBits(totalBanks)),
-        bankFreeList(totalBanks, nullptr) {
+        totalBanks(numRows * numCols), totalBankMask(totalBanks - 1),
+        totalBankBits(countBits(totalBanks)), minHopsBreakRoundShift(4),
+        minHopsBreakMask((totalBankMask << minHopsBreakRoundShift) |
+                         ((1 << minHopsBreakRoundShift) - 1)),
+        bankFreeList(totalBanks, nullptr), numZeroDeltaAllocBank(totalBanks) {
     assert(ArenaSize > totalBanks && "Arena too small.");
     assert(numRows >= 1);
     assert((numRows & (numRows - 1)) == 0);
@@ -101,9 +110,7 @@ public:
     for (int bank = 0; bank < MaxBanks; ++bank) {
       this->allocBankCount[bank] = 0;
     }
-    if (this->args.allocPolicy == AffinityAllocatorArgs::AllocPolicy::RANDOM) {
-      this->initShuffledBankIdxes();
-    }
+    this->initShuffledBankIdxes();
   }
 
   AffinityAllocator(const AffinityAllocator &other) = delete;
@@ -162,7 +169,10 @@ public:
   const int colMask;
   const int colBits;
   const int totalBanks;
+  const int totalBankMask;
   const int totalBankBits;
+  const int minHopsBreakRoundShift;
+  const int minHopsBreakMask;
   using RegionInfoMap = std::map<Addr, RegionInfo>;
   using RegionInfoMapIter = typename std::map<Addr, RegionInfo>::iterator;
   RegionInfoMap vaddrRegionMap;
@@ -184,6 +194,8 @@ public:
   // Number of allocated data at each bank.
   size_t totalAllocCount = 0;
   std::array<size_t, MaxBanks> allocBankCount;
+  // Number of bank currently with zero delta alloc count.
+  size_t numZeroDeltaAllocBank;
 
   void initBankToBankHops() {
     for (int bankA = 0; bankA < this->totalBanks; ++bankA) {
@@ -203,6 +215,29 @@ public:
   // Free list at each bank.
   std::vector<NodeT *> bankFreeList;
 
+  AFFINITY_ALLOC_NO_INLINE
+  void incBankAllocCount(int bank) {
+    auto &cnt = this->allocBankCount.at(bank);
+    cnt++;
+    this->totalAllocCount++;
+    if (this->args.allocPolicy == AffinityAllocatorArgs::AllocPolicy::DELTA) {
+      // We need to maintain the delta.
+      if (cnt == 1) {
+        this->numZeroDeltaAllocBank--;
+      }
+      if (this->numZeroDeltaAllocBank == 0) {
+        for (int i = 0; i < this->totalBanks; ++i) {
+          auto &x = this->allocBankCount.at(i);
+          x--;
+          if (x == 0) {
+            this->numZeroDeltaAllocBank++;
+          }
+        }
+        this->totalAllocCount -= this->totalBanks;
+      }
+    }
+  }
+
   void pushBankFreeList(int bank, NodeT *node) {
     auto &head = bankFreeList.at(bank);
     if (head) {
@@ -220,8 +255,7 @@ public:
     if (head) {
       head->prev = nullptr;
     }
-    this->allocBankCount.at(bank)++;
-    this->totalAllocCount++;
+    this->incBankAllocCount(bank);
     return ret;
   }
 
@@ -326,7 +360,13 @@ public:
   int chooseAllocBankMinHops(const AffinityAddressVecT &affinityAddrs) {
     /**
      * Simply choose bank with minimal travel hops.
+     * However, to avoid a pathological case when allocation a single
+     * link-based data structure, fall back to random policy if we allocated
+     * some rounds for banks.
      */
+    if ((this->totalAllocCount & this->minHopsBreakMask) == 0) {
+      return this->chooseAllocBankRandom();
+    }
     this->computeHopsToEachBank(affinityAddrs);
     return reservoirSampleMinIdx(this->hopsToEachBank.hops);
   }
@@ -335,9 +375,16 @@ public:
   int chooseAllocBankMinLoad() {
     /**
      * Simply choose bank with minimal load (actually round robin).
+     * However, to avoid a pathological case when allocation a when the data
+     * structure size is multiple of the number of banks and creating hotspot in
+     * the system, fall back to random policy if we allocated some rounds for
+     * banks.
      */
     auto ret = this->nextRoundRobinBank;
-    this->nextRoundRobinBank++;
+    if ((this->totalAllocCount & this->minHopsBreakMask) == 0) {
+      ret = this->chooseAllocBankRandom();
+    }
+    this->nextRoundRobinBank = ret + 1;
     if (this->nextRoundRobinBank == this->totalBanks) {
       this->nextRoundRobinBank = 0;
     }
@@ -436,6 +483,7 @@ public:
       return this->chooseAllocBankMinHops(affinityAddrs);
       break;
     case AffinityAllocatorArgs::AllocPolicy::HYBRID:
+    case AffinityAllocatorArgs::AllocPolicy::DELTA:
       return this->chooseAllocBankHybrid(affinityAddrs);
       break;
     }
