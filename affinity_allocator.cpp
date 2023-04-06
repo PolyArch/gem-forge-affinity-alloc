@@ -26,6 +26,11 @@ AffinityAllocatorArgs AffinityAllocatorArgs::initialize() {
       args.allocPolicy = AllocPolicy::DELTA;
     }
   }
+  if (const char *envLoadWeight =
+          std::getenv("AFFINITY_ALLOCATOR_LOAD_WEIGHT")) {
+    args.loadWeight = std::atoi(envLoadWeight);
+    DPRINTF("LoadWeight  = %d\n", args.loadWeight);
+  }
 
   return args;
 }

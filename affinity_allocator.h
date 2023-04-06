@@ -61,6 +61,7 @@ struct AffinityAllocatorArgs {
     DELTA = 4
   };
   AllocPolicy allocPolicy = RANDOM;
+  int loadWeight = 7;
   // Initialize from enviroment variables.
   static AffinityAllocatorArgs initialize();
 };
@@ -97,7 +98,8 @@ public:
         totalBankBits(countBits(totalBanks)), minHopsBreakRoundShift(4),
         minHopsBreakMask((totalBankMask << minHopsBreakRoundShift) |
                          ((1 << minHopsBreakRoundShift) - 1)),
-        bankFreeList(totalBanks, nullptr), numZeroDeltaAllocBank(totalBanks) {
+        bankFreeList(totalBanks, nullptr), numZeroDeltaAllocBank(totalBanks),
+        loadWeight(args.loadWeight) {
     assert(ArenaSize > totalBanks && "Arena too small.");
     assert(numRows >= 1);
     assert((numRows & (numRows - 1)) == 0);
@@ -423,7 +425,7 @@ public:
 
   using ScoreT = float;
   std::array<ScoreT, MaxBanks> bankScores;
-  ScoreT loadCoeff = 7;
+  ScoreT loadWeight = 7;
   AFFINITY_ALLOC_NO_INLINE
   int chooseAllocBankHybrid(const AffinityAddressVecT &affinityAddrs) {
     /**
@@ -450,7 +452,7 @@ public:
       auto costLoad = static_cast<ScoreT>(this->allocBankCount.at(bank)) /
                           static_cast<ScoreT>(avgAllocCountPerBank) -
                       1;
-      this->bankScores.at(bank) = costHops + loadCoeff * costLoad;
+      this->bankScores.at(bank) = costHops + loadWeight * costLoad;
     }
 #else
 #pragma clang loop vectorize_width(8)
@@ -459,7 +461,7 @@ public:
       auto costLoad = static_cast<ScoreT>(this->allocBankCount.at(bank)) /
                           static_cast<ScoreT>(avgAllocCountPerBank) -
                       1;
-      this->bankScores.at(bank) = costHops + loadCoeff * costLoad;
+      this->bankScores.at(bank) = costHops + loadWeight * costLoad;
     }
 #endif
     return this->reservoirSampleMinIdx(this->bankScores);
