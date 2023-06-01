@@ -8,6 +8,7 @@
 #include <map>
 #include <mutex>
 #include <shared_mutex>
+#include <sstream>
 #include <vector>
 
 #include <immintrin.h>
@@ -47,10 +48,36 @@ int countBits(int v) {
   }
   return bits;
 }
+
+void dumpBankCount(size_t *cnt, int nBanks) {
+#ifdef AFFINITY_ALLOC_DPRINTF
+  std::stringstream ss;
+  for (int i = 0; i < nBanks; i += 8) {
+    for (int j = i; j < std::min(nBanks, i + 8); j++) {
+      ss << cnt[j] << ' ';
+    }
+    ss << '\n';
+  }
+  DPRINTF("BankCnt \n%s", ss.str().c_str());
+#endif
+}
+
 } // namespace
 
 using Addr = std::uintptr_t;
-using AffinityAddressVecT = std::vector<Addr>;
+
+struct AffinityAddrs {
+  const int n;
+  const Addr *const addrs;
+  AffinityAddrs(int _n, const Addr *_addrs) : n(_n), addrs(_addrs) {}
+
+  size_t size() const { return this->n; }
+  const Addr *begin() const { return this->addrs; }
+  const Addr *end() const { return this->addrs + n; }
+};
+
+// using AffinityAddressVecT = std::vector<Addr>;
+using AffinityAddressVecT = AffinityAddrs;
 
 struct AffinityAllocatorArgs {
   enum AllocPolicy {
@@ -62,6 +89,7 @@ struct AffinityAllocatorArgs {
   };
   AllocPolicy allocPolicy = RANDOM;
   int loadWeight = 7;
+  int logLevel = 0;
   // Initialize from enviroment variables.
   static AffinityAllocatorArgs initialize();
 };
@@ -99,7 +127,7 @@ public:
         minHopsBreakMask((totalBankMask << minHopsBreakRoundShift) |
                          ((1 << minHopsBreakRoundShift) - 1)),
         bankFreeList(totalBanks, nullptr), numZeroDeltaAllocBank(totalBanks),
-        loadWeight(args.loadWeight) {
+        loadWeight(args.loadWeight), logLevel(args.logLevel) {
     assert(ArenaSize > totalBanks && "Arena too small.");
     assert(numRows >= 1);
     assert((numRows & (numRows - 1)) == 0);
@@ -125,6 +153,24 @@ public:
   NodeT *alloc(const AffinityAddressVecT &affinityAddrs) {
 
     auto allocBank = this->chooseAllocBank(affinityAddrs);
+    if (this->logLevel >= 1) {
+      DPRINTF("Alloc at Bank %d.\n", allocBank);
+    }
+#ifndef GEM_FORGE
+    {
+      switch (this->args.allocPolicy) {
+      case AffinityAllocatorArgs::AllocPolicy::MIN_HOPS:
+      case AffinityAllocatorArgs::AllocPolicy::HYBRID:
+      case AffinityAllocatorArgs::AllocPolicy::DELTA:
+        break;
+      default:
+        this->computeHopsToEachBank(affinityAddrs);
+        break;
+      }
+      this->totalAllocHopsToAffinityAddrs +=
+          this->hopsToEachBank.hops.at(allocBank);
+    }
+#endif
 
     if (!this->bankFreeList.at(allocBank)) {
       this->allocArena();
@@ -156,10 +202,10 @@ public:
     RegionInfo(Addr _lhs, Addr _rhs, Addr _interleave, int _startBank)
         : lhs(_lhs), rhs(_rhs), interleave(_interleave), startBank(_startBank) {
     }
-    int calculateBank(Addr vaddr, int totalBanks) const {
+    int calculateBank(Addr vaddr, int bankMask) const {
       auto diff = vaddr - this->lhs;
       auto bank = diff / this->interleave;
-      return (this->startBank + bank) % totalBanks;
+      return (this->startBank + bank) & bankMask;
     }
   };
 
@@ -196,6 +242,10 @@ public:
   // Number of allocated data at each bank.
   size_t totalAllocCount = 0;
   std::array<size_t, MaxBanks> allocBankCount;
+  // Accumulated hops to all affinity addresses.
+  size_t totalAllocHopsToAffinityAddrs = 0;
+  // Accumulated min hops to all affinity addresses.
+  size_t totalMinHopsToAffinityAddrs = 0;
   // Number of bank currently with zero delta alloc count.
   size_t numZeroDeltaAllocBank;
 
@@ -277,7 +327,12 @@ public:
         .first;
   }
 
+  const RegionInfo *memorizedRegion = nullptr;
   const RegionInfo &getOrInitRegionInfo(Addr vaddr) {
+    if (this->memorizedRegion && vaddr >= this->memorizedRegion->lhs &&
+        vaddr < this->memorizedRegion->rhs) {
+      return *this->memorizedRegion;
+    }
     auto iter = this->vaddrRegionMap.upper_bound(vaddr);
     if (iter == this->vaddrRegionMap.begin()) {
       iter = this->initRegionInfo(vaddr);
@@ -288,6 +343,7 @@ public:
       }
     }
     const auto &region = iter->second;
+    this->memorizedRegion = &region;
     return region;
   }
 
@@ -300,7 +356,7 @@ public:
   AFFINITY_ALLOC_NO_INLINE
   int getBank(Addr vaddr) {
     return this->getOrInitRegionInfo(vaddr).calculateBank(vaddr,
-                                                          this->totalBanks);
+                                                          this->totalBankMask);
   }
 
   int64_t computeHops(int64_t bankA, int64_t bankB) {
@@ -358,6 +414,23 @@ public:
     }
     return allocBank;
   }
+
+  template <typename Cnt>
+  AFFINITY_ALLOC_NO_INLINE int
+  getMinIdx(const std::array<Cnt, MaxBanks> &values) {
+    auto allocBank = 0;
+    auto minV = values[0];
+    // Simply sample the min value index.
+    for (int bank = 1; bank < this->totalBanks; ++bank) {
+      auto v = values[bank];
+      if (v < minV) {
+        minV = v;
+        allocBank = bank;
+      }
+    }
+    return allocBank;
+  }
+
   AFFINITY_ALLOC_NO_INLINE
   int chooseAllocBankMinHops(const AffinityAddressVecT &affinityAddrs) {
     /**
@@ -370,7 +443,8 @@ public:
       return this->chooseAllocBankRandom();
     }
     this->computeHopsToEachBank(affinityAddrs);
-    return reservoirSampleMinIdx(this->hopsToEachBank.hops);
+    auto bankIdx = reservoirSampleMinIdx(this->hopsToEachBank.hops);
+    return bankIdx;
   }
 
   int nextRoundRobinBank = 0;
@@ -378,9 +452,9 @@ public:
     /**
      * Simply choose bank with minimal load (actually round robin).
      * However, to avoid a pathological case when allocation a when the data
-     * structure size is multiple of the number of banks and creating hotspot in
-     * the system, fall back to random policy if we allocated some rounds for
-     * banks.
+     * structure size is multiple of the number of banks and creating hotspot
+     * in the system, fall back to random policy if we allocated some rounds
+     * for banks.
      */
     auto ret = this->nextRoundRobinBank;
     if ((this->totalAllocCount & this->minHopsBreakMask) == 0) {
@@ -426,6 +500,7 @@ public:
   using ScoreT = float;
   std::array<ScoreT, MaxBanks> bankScores;
   ScoreT loadWeight = 7;
+  int logLevel = 0;
   AFFINITY_ALLOC_NO_INLINE
   int chooseAllocBankHybrid(const AffinityAddressVecT &affinityAddrs) {
     /**
@@ -434,12 +509,22 @@ public:
      * cost_hops(bank) = hops(bank) / num_affinity_address
      * cost_load(bank) = load(bank) / avg_load - 1
      */
+    if (logLevel >= 1) {
+      size_t avgAllocCountPerBank =
+          (this->totalAllocCount + this->totalBanks - 1) >> this->totalBankBits;
+      DPRINTF("Hybrid: AffAddrs %lu TotalCnt %lu Avg %lu.\n",
+              affinityAddrs.size(), this->totalAllocCount,
+              avgAllocCountPerBank);
+      dumpBankCount(this->allocBankCount.data(), this->totalBanks);
+    }
     auto numAffinityAddrs = affinityAddrs.size();
     if (numAffinityAddrs == 0) {
       // No affinity address, fallback to pick the min load.
       return this->reservoirSampleMinIdx(this->allocBankCount);
     }
-    size_t avgAllocCountPerBank = this->totalAllocCount >> this->totalBankBits;
+    // Round up so that first few cache lines gets correct load balance.
+    size_t avgAllocCountPerBank =
+        (this->totalAllocCount + this->totalBanks - 1) >> this->totalBankBits;
     if (avgAllocCountPerBank == 0) {
       // Fall back to min traffic.
       return this->chooseAllocBankMinHops(affinityAddrs);
@@ -464,12 +549,16 @@ public:
       this->bankScores.at(bank) = costHops + loadWeight * costLoad;
     }
 #endif
-    return this->reservoirSampleMinIdx(this->bankScores);
+    // Due to float score, no need to do reservoir sampling?
+    // auto bankIdx = this->reservoirSampleMinIdx(this->bankScores);
+    auto bankIdx = this->getMinIdx(this->bankScores);
+    return bankIdx;
   }
 
   int chooseAllocBank(const AffinityAddressVecT &affinityAddrs) {
     /**
-     * For now we have a simple policy: allocate at the bank with minimal hops.
+     * For now we have a simple policy: allocate at the bank with minimal
+     * hops.
      */
     switch (this->args.allocPolicy) {
     default:
@@ -581,6 +670,21 @@ public:
   };
 
   static InitFreeNodeIndexes initFreeNodeIndexes;
+
+  void printStats() const {
+    auto totalAlloc = this->totalAllocCount;
+    printf("[AffStats]  TotalAlloc %10lu Hops %10lu\n", totalAlloc,
+           this->totalAllocHopsToAffinityAddrs);
+    for (int i = 0; i < this->numRows; ++i) {
+      printf("[AffStats]  ");
+      for (int j = 0; j < this->numCols; ++j) {
+        auto alloc = this->allocBankCount.at(i * this->numCols + j);
+        auto ratio = alloc / static_cast<float>(totalAlloc) * 100.f;
+        printf("%7.2f", ratio);
+      }
+      printf("\n");
+    }
+  }
 };
 
 template <int NodeSize, int ArenaSize>
@@ -625,6 +729,20 @@ public:
     return iter.first->second;
   }
 
+  void printStats() const {
+    for (const auto &entry : this->allocators) {
+      printf("[AffStats] NodeSize %5d Thread %3d.\n", NodeSize, entry.first);
+      entry.second->printStats();
+    }
+  }
+
+  void clear() {
+#ifndef GEM_FORGE
+    std::unique_lock lock(mutex);
+#endif
+    this->allocators.clear();
+  }
+
 #ifndef GEM_FORGE
   mutable std::shared_mutex mutex;
 #endif
@@ -632,6 +750,10 @@ public:
 };
 
 void *alloc(size_t size, const AffinityAddressVecT &affinityAddrs);
+
+void printAllocatorStats();
+
+void clearAllocator();
 
 } // namespace affinity_alloc
 

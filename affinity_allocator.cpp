@@ -31,6 +31,10 @@ AffinityAllocatorArgs AffinityAllocatorArgs::initialize() {
     args.loadWeight = std::atoi(envLoadWeight);
     DPRINTF("LoadWeight  = %d\n", args.loadWeight);
   }
+  if (const char *envLogLevel = std::getenv("AFFINITY_ALLOCATOR_LOG_LEVEL")) {
+    args.logLevel = std::atoi(envLogLevel);
+    DPRINTF("LoadLevel = %d\n", args.logLevel);
+  }
 
   return args;
 }
@@ -91,6 +95,24 @@ void *alloc(size_t size, const AffinityAddressVecT &affinityAddrs) {
     break;
   }
 #undef CASE
+}
+
+void printAllocatorStats() {
+  allocator64B.printStats();
+  allocator128B.printStats();
+  allocator256B.printStats();
+  allocator512B.printStats();
+  allocator1024B.printStats();
+  allocator4096B.printStats();
+}
+
+void clearAllocator() {
+  allocator64B.clear();
+  allocator128B.clear();
+  allocator256B.clear();
+  allocator512B.clear();
+  allocator1024B.clear();
+  allocator4096B.clear();
 }
 
 } // namespace affinity_alloc

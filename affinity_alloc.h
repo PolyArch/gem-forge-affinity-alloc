@@ -23,6 +23,17 @@ void *malloc_aff(size_t size, int n, const void **affinity_addrs);
  */
 void free_aff(void *ptr);
 
+/**
+ * @brief For test: Print the allocator stats so far.
+ */
+void print_affinity_alloc_stats();
+
+/**
+ * @brief For test: Clear all allocator.
+ * ! Will leak memory.
+ */
+void clear_affinity_alloc();
+
 #ifdef __cplusplus
 }
 #endif
