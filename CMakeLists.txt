@@ -25,7 +25,7 @@ target_include_directories(AffinityAlloc PUBLIC
     ${GEM_FORGE_GEM5_INC_PATH}
 )
 set_target_properties(AffinityAlloc PROPERTIES
-    COMPILE_FLAGS "-std=c++17 -O3 -mavx2 -g -DAFFINITY_ALLOC_DPRINTF"
+    COMPILE_FLAGS "-std=c++17 -O3 -mavx2 -g -DAFFINITY_ALLOC_SINGLE_THREAD -DAFFINITY_ALLOC_ARENA_SIZE=524288"
 )
 
 add_library(AffinityAllocStatic STATIC ${AffinityAllocSrc})

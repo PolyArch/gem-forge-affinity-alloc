@@ -33,7 +33,7 @@ AffinityAllocatorArgs AffinityAllocatorArgs::initialize() {
   }
   if (const char *envLogLevel = std::getenv("AFFINITY_ALLOCATOR_LOG_LEVEL")) {
     args.logLevel = std::atoi(envLogLevel);
-    DPRINTF("LoadLevel = %d\n", args.logLevel);
+    DPRINTF("LogLevel = %d\n", args.logLevel);
   }
 
   return args;
@@ -45,13 +45,16 @@ constexpr size_t FixNodeSizes[] = {
 };
 
 // Specialize the allocator for predefined sizes.
-constexpr size_t FixArenaSize = 1 * 1024 * 1024;
-MultiThreadAffinityAllocator<64, 8192> allocator64B;
-MultiThreadAffinityAllocator<128, FixArenaSize> allocator128B;
-MultiThreadAffinityAllocator<256, FixArenaSize> allocator256B;
-MultiThreadAffinityAllocator<512, FixArenaSize> allocator512B;
-MultiThreadAffinityAllocator<1024, FixArenaSize> allocator1024B;
-MultiThreadAffinityAllocator<4096, FixArenaSize> allocator4096B;
+#ifndef AFFINITY_ALLOC_ARENA_SIZE
+#define AFFINITY_ALLOC_ARENA_SIZE 8192
+#endif
+constexpr size_t FixArenaSize = AFFINITY_ALLOC_ARENA_SIZE;
+MultiThreadAffinityAllocator<64, FixArenaSize> allocator64B;
+// MultiThreadAffinityAllocator<128, FixArenaSize> allocator128B;
+// MultiThreadAffinityAllocator<256, FixArenaSize> allocator256B;
+// MultiThreadAffinityAllocator<512, FixArenaSize> allocator512B;
+// MultiThreadAffinityAllocator<1024, FixArenaSize> allocator1024B;
+// MultiThreadAffinityAllocator<4096, FixArenaSize> allocator4096B;
 
 std::string printAddrs(const AffinityAddressVecT &addrs) {
   std::stringstream ss;
@@ -72,8 +75,12 @@ void *alloc(size_t size, const AffinityAddressVecT &affinityAddrs) {
   }
   assert(roundSize != 0 && "Illegal size.");
 
-  // Get the tid.
+// Get the tid.
+#ifdef AFFINITY_ALLOC_SINGLE_THREAD
+  int tid = 0;
+#else
   int tid = gettid();
+#endif
 
   // printf("[AffAlloc Th=%d] Alloc Size %lu/%d AffAddrs %s.\n", tid, size,
   //        roundSize, printAddrs(affinityAddrs).c_str());
@@ -85,11 +92,11 @@ void *alloc(size_t size, const AffinityAddressVecT &affinityAddrs) {
     break;
   switch (roundSize) {
     CASE(64);
-    CASE(128);
-    CASE(256);
-    CASE(512);
-    CASE(1024);
-    CASE(4096);
+    // CASE(128);
+    // CASE(256);
+    // CASE(512);
+    // CASE(1024);
+    // CASE(4096);
   default:
     assert(false && "Illegal size.");
     break;
@@ -99,20 +106,20 @@ void *alloc(size_t size, const AffinityAddressVecT &affinityAddrs) {
 
 void printAllocatorStats() {
   allocator64B.printStats();
-  allocator128B.printStats();
-  allocator256B.printStats();
-  allocator512B.printStats();
-  allocator1024B.printStats();
-  allocator4096B.printStats();
+  // allocator128B.printStats();
+  // allocator256B.printStats();
+  // allocator512B.printStats();
+  // allocator1024B.printStats();
+  // allocator4096B.printStats();
 }
 
 void clearAllocator() {
   allocator64B.clear();
-  allocator128B.clear();
-  allocator256B.clear();
-  allocator512B.clear();
-  allocator1024B.clear();
-  allocator4096B.clear();
+  // allocator128B.clear();
+  // allocator256B.clear();
+  // allocator512B.clear();
+  // allocator1024B.clear();
+  // allocator4096B.clear();
 }
 
 } // namespace affinity_alloc

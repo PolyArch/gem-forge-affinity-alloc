@@ -156,7 +156,7 @@ public:
     if (this->logLevel >= 1) {
       DPRINTF("Alloc at Bank %d.\n", allocBank);
     }
-#ifndef GEM_FORGE
+#ifdef AFFINITY_ALLOC_PROFILE
     {
       switch (this->args.allocPolicy) {
       case AffinityAllocatorArgs::AllocPolicy::MIN_HOPS:
@@ -198,13 +198,14 @@ public:
     const Addr lhs;
     const Addr rhs;
     const Addr interleave;
+    const Addr interleaveShift;
     const int startBank;
     RegionInfo(Addr _lhs, Addr _rhs, Addr _interleave, int _startBank)
-        : lhs(_lhs), rhs(_rhs), interleave(_interleave), startBank(_startBank) {
-    }
+        : lhs(_lhs), rhs(_rhs), interleave(_interleave),
+          interleaveShift(countBits(_interleave)), startBank(_startBank) {}
     int calculateBank(Addr vaddr, int bankMask) const {
       auto diff = vaddr - this->lhs;
-      auto bank = diff / this->interleave;
+      auto bank = diff >> this->interleaveShift;
       return (this->startBank + bank) & bankMask;
     }
   };
